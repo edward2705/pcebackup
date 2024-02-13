@@ -22,8 +22,8 @@
 # Script  : pcebackup.sh
 # Comments: Script to backup PCE database
 #           Version supported: 19.3.x, 21.x, 22.x
-# Version : 2.1
-# Rev Date: 10-2023
+# Version : 2.2
+# Rev Date: 02-2024
 
 
 BASEDIR=$(dirname $0)
@@ -60,35 +60,33 @@ is_redis_server() {
 }
 
 is_db_master() {
+   DBMASTER_TYPE="$1"
    DB_MGMT_PARAM=""
    get_version_build
    BASE_VERSION=$(echo $VERSION | cut -f1 -d\.)
 
-   if [ $BASE_VERSION -eq 19 ]; then
-      DB_MGMT_PARAM="show-master"
-   else
-      DB_MGMT_PARAM="show-primary"
-   fi
+   DB_MGMT_PARAM="is-primary?"
 
    #REDIS=$(sudo -E -u ilo-pce illumio-pce-ctl cluster-status | grep agent_traffic_redis_server | awk '{ print $2}')
-   DBMASTER=$(sudo -E -u ilo-pce illumio-pce-db-management $DB_MGMT_PARAM  | grep -c "^Database Primary Node IP")
+   DBMASTER=$(sudo -E -u ilo-pce illumio-pce-db-management $DBMASTER_TYPE $DB_MGMT_PARAM  | grep -c "^true")
 
-   [ $DBMASTER -gt 0 ] && return 1 || return 0
+   [ $DBMASTER -gt 0 ] && return 0 || return 1
 }
 
 
 usage() {
    echo
-   echo "Usage: $0 -d <directory location> -b [policydb | trafficdb | sc_data_dump | all]   [-r retention_period ] [-u remote_user ] [-h remote_host] [-p remote_path ]"
+   echo "Usage: $0 -d <directory location> -b [policydb | trafficdb | reportdb | sc_data_dump | all]   [-r retention_period ] [-u remote_user ] [-h remote_host] [-p remote_path ]"
    echo "  -d PCE backup direction location"
    echo "  -r Database backup retention period"
    echo "     Default is 7 days"
    echo "  -m [true|false]"
    echo "     Backup only on master database node"
-   echo "  -b [policydb|trafficdb|sc_data_dump|all]"
+   echo "  -b [policydb|trafficdb|reportdb|sc_data_dump|all]"
    echo "     where:"
    echo "        policydb => backup policy database"
    echo "        trafficdb => backup traffic database"
+   echo "        reportdb => backup reportdb database"
    echo "        sc_data_dump => supercluster data dump"
    echo "        all => backup policy and traffic database"
    echo 
@@ -109,14 +107,23 @@ pce_dbdump() {
    BACKUP="$2"
    if [ $BACKUP = "trafficdb"  ]; then
       log_print "INFO" "Backing up the traffic database" 
+      log_print "INFO" "sudo -E -u ilo-pce illumio-pce-db-management traffic dump --file $1"
       sudo -E -u ilo-pce illumio-pce-db-management traffic dump --file $1 >> $LOGFILE
+
       [ $? -gt 0 ] && log_print "ERROR" "Database backup failed!"
    elif [ $BACKUP = "policydb" ]; then
       log_print "INFO" "Backing up the policy database" 
+      log_print "INFO" "sudo -E -u ilo-pce illumio-pce-db-management dump --file $1"
       sudo -E -u ilo-pce illumio-pce-db-management dump --file $1 >> $LOGFILE
+      [ $? -gt 0 ] && log_print "ERROR" "Database backup failed!"
+   elif [ $BACKUP = "reportdb" ]; then
+      log_print "INFO" "Backing up the report database" 
+      log_print "INFO" "sudo -E -u ilo-pce illumio-pce-db-management report dump --file $1"
+      sudo -E -u ilo-pce illumio-pce-db-management report dump --file $1 >> $LOGFILE
       [ $? -gt 0 ] && log_print "ERROR" "Database backup failed!"
    elif [ $BACKUP = "sc_data_dump" ]; then
       log_print "INFO" "Backing up the Supercluster data dump" 
+      log_print "INFO" "sudo -E -u ilo-pce illumio-pce-db-management supercluster-data-dump --file $1"
       sudo -E -u ilo-pce illumio-pce-db-management supercluster-data-dump --file $1 >> $LOGFILE
    fi 
 
@@ -192,7 +199,7 @@ get_version_build
 
 [[ -z "$BACKUP_TYPE" ]] && usage
 
-if [ $BACKUP_TYPE != "policydb" ] && [ $BACKUP_TYPE != "trafficdb" ] && [ $BACKUP_TYPE != "sc_data_dump" ] && [ $BACKUP_TYPE != "all" ]; then
+if [ $BACKUP_TYPE != "policydb" ] && [ $BACKUP_TYPE != "reportdb" ] && [ $BACKUP_TYPE != "trafficdb" ] && [ $BACKUP_TYPE != "sc_data_dump" ] && [ $BACKUP_TYPE != "all" ]; then
    usage
 fi
 
@@ -233,14 +240,22 @@ if [ $DBMASTER_FLAG = "true" ]; then
 fi
 
 [ $VERSION_BUILD = "" ] && DMP_PREFIX="pcebackup" || DMP_PREFIX="pcebackup.$VERSION_BUILD"
+ 
+[ $IS_DBMASTER -eq 0  ] && DMP_PREFIX_MASTER="$DMP_PREFIX.master" || DMP_PREFIX_MASTER="$DMP_PREFIX"
+[ $IS_REDIS_SERVER -eq 0  ] && DMP_PREFIX_MASTER="$DMP_PREFIX_MASTER.redis_server" 
 
-[ $IS_DBMASTER -eq 0  ] && DMP_PREFIX="$DMP_PREFIX.master"
+POLICYDB_DMPFILE="$DMP_PREFIX_MASTER.policydb.$HOSTNAME.dbdump.$DTE"
 
-[ $IS_REDIS_SERVER -eq 0  ] && DMP_PREFIX="$DMP_PREFIX.redis_server"
+is_db_master "traffic"
+IS_DBMASTER=$?
+[ $IS_DBMASTER -eq 0  ] && DMP_PREFIX_TRAFFIC="$DMP_PREFIX.master" || DMP_PREFIX_TRAFFIC="$DMP_PREFIX"
+TRAFFICDB_DMPFILE="$DMP_PREFIX_TRAFFIC.trafficdb.$HOSTNAME.dbdump.$DTE"
 
-POLICYDB_DMPFILE="$DMP_PREFIX.policydb.$HOSTNAME.dbdump.$DTE"
-TRAFFICDB_DMPFILE="$DMP_PREFIX.trafficdb.$HOSTNAME.dbdump.$DTE"
-REPORTDB_DMPFILE="$DMP_PREFIX.reportdb.$HOSTNAME.dbdump.$DTE"
+is_db_master "report"
+IS_DBMASTER=$?
+[ $IS_DBMASTER -eq 0  ] && DMP_PREFIX_REPORT="$DMP_PREFIX.master" || DMP_PREFIX_REPORT="$DMP_PREFIX"
+REPORTDB_DMPFILE="$DMP_PREFIX_REPORT.reportdb.$HOSTNAME.dbdump.$DTE"
+
 SC_DMPFILE="$DMP_PREFIX.supercluster-data-dump.$HOSTNAME.dbdump.$DTE"
 
 [ -z $RETENTION ] && RETENTION=7
@@ -268,6 +283,10 @@ if [ $? -eq 0 ]; then
       pce_dbdump $DUMPDIR/$TRAFFICDB_DMPFILE "trafficdb"
    fi
 
+   if  [ $BACKUP_TYPE = "reportdb" ] || [ $BACKUP_TYPE = "all" ]; then
+      pce_dbdump $DUMPDIR/$REPORTDB_DMPFILE "reportdb"
+   fi
+
 else 
    echo "ERROR: Can't write to directory $DUMPDIR"
    echo "       Check if directory $DUMPDIR has the right permission"
@@ -281,6 +300,10 @@ if [ ! -z $RMTHOST ] && [ ! -z $RMTPATH ] && [ ! -z $RMTUSER ]; then
    fi
 
    if  [ $BACKUP_TYPE = "trafficdb" ] || [ $BACKUP_TYPE = "all" ]; then
+      scp_remote_host "$DUMPDIR/$TRAFFICDB_DMPFILE" $SSHKEY "$RMTUSER" $RMTHOST "$RMTPATH"
+   fi
+
+   if  [ $BACKUP_TYPE = "reportdb" ] || [ $BACKUP_TYPE = "all" ]; then
       scp_remote_host "$DUMPDIR/$TRAFFICDB_DMPFILE" $SSHKEY "$RMTUSER" $RMTHOST "$RMTPATH"
    fi
 
